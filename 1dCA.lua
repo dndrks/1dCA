@@ -3,6 +3,7 @@
 -- EDIT THIS!
 max_brightness = 10
 
+local grid_size = grid_size_x() * grid_size_y()
 local start_time = get_time()
 local dirty = true
 local intro_metro = 1
@@ -13,10 +14,9 @@ local redraw_metro = 2
 local snapshots_saver_metro = 3
 local main_metro = 4
 
-local number_of_voices = 4
+local number_of_voices = grid_size == 128 and 8 or 16
 local transport_running = false
 
--- local ppqn = 96
 ppqn = {}
 local ppqn_counter = {}
 for i = 1, number_of_voices do
@@ -42,6 +42,34 @@ for i = 1, number_of_voices do
 	notes[i] = { 60, 62, 64, 67, 72, 77 }
 end
 
+-- BINARY OPS //
+function number_to_binary(n)
+	local binary_translate = {}
+	for i = 0, 7 do
+		table.insert(binary_translate, (n & (2 ^ i)) >> i)
+	end
+	return binary_translate
+end
+
+function binary_to_number(t)
+	local number_translate = ""
+	for i = #t, 1, -1 do
+		number_translate = number_translate .. t[i]
+	end
+	return tonumber(number_translate, 2)
+end
+
+-- translate the seed integer to binary
+local function seed_to_binary(v)
+	return number_to_binary(voice[v].seed)
+end
+
+-- translate the rule integer to binary
+local function rule_to_binary(v)
+	return number_to_binary(voice[v].rule)
+end
+-- // BINARY OPS
+
 voice = {}
 local display_voice = {}
 for i = 1, number_of_voices do
@@ -50,15 +78,16 @@ for i = 1, number_of_voices do
 	voice[i].octave = 0
 	voice[i].active_notes = {}
 	voice[i].ch = i
+	voice[i].vel = 64
 	voice[i].seed = 36+i
 	voice[i].seed_as_binary = {}
 	voice[i].next_seed = voice[i].seed
+	voice[i].originating_seed = voice[i].seed
 	voice[i].rule = 30
-	voice[i].rule_as_binary = {}
+	voice[i].rule_as_binary = rule_to_binary(i)
 	voice[i].scale_low = 1
 	voice[i].scale_high = #notes[i]
 	voice[i].semi = 0
-	voice[i].out = {}
 	display_voice[i] = false
 end
 
@@ -117,45 +146,54 @@ function snapshot_clear(slot)
 	snapshots[slot].data = {}
 	dirty = true
 end
+
+function snapshot_press(x,y,z)
+	if z == 1 then
+		if #snapshots[y].data == 0 then
+			if snapshot_being_saved == nil then
+				snapshot_being_saved = y
+				metro_set(snapshots_saver_metro, 250, 1)
+			end
+		elseif not _alt then
+			if snapshots.focus == y then
+				snapshot_unpack(y, true)
+			else
+				snapshots.focus = y
+				snapshot_unpack(y, false)
+			end
+		else
+			if snapshot_being_saved == nil then
+				snapshot_being_saved = y
+				metro_set(snapshots_saver_metro, 250, 1)
+			end
+		end
+	else
+		if snapshot_being_saved ~= nil then
+			metro_stop(snapshots_saver_metro)
+			snapshot_being_saved = nil
+		end
+	end
+end
 -- // SNAPSHOTS
 
 -- GRID //
 -- GRID KEY HANDLING:
 function grid(x, y, z)
 	-- SNAPSHOT MANAGEMENT:
-	if x == 16 and y <= 6 then
-		if z == 1 then
-			if #snapshots[y].data == 0 then
-				if snapshot_being_saved == nil then
-					snapshot_being_saved = y
-					metro_set(snapshots_saver_metro, 250, 1)
-				end
-			elseif not _alt then
-				if snapshots.focus == y then
-					snapshot_unpack(y, true)
-				else
-					snapshots.focus = y
-					snapshot_unpack(y, false)
-				end
-			else
-				if snapshot_being_saved == nil then
-					snapshot_being_saved = y
-					metro_set(snapshots_saver_metro, 250, 1)
-				end
-			end
-		else
-			if snapshot_being_saved ~= nil then
-				metro_stop(snapshots_saver_metro)
-				snapshot_being_saved = nil
-			end
-		end
-
+	if x == 16 and y <= (grid_size == 128 and 6 or 14) then
+		snapshot_press(x,y,z)
 	-- BITS:
-	elseif x <= 9 and z == 1 then
-		voice[y].bit = 9-x
-
+	elseif x <= 9 and y <= number_of_voices and z == 1 then
+		-- CHANGE RULE:
+		if _alt then
+			voice[y].rule_as_binary[9-x] = voice[y].rule_as_binary[9-x] == 1 and 0 or 1
+			change_rule(y, binary_to_number(voice[y].rule_as_binary))
+		-- CHANGE BIT:
+		else
+			voice[y].bit = 9 - x
+		end
 	-- ALT KEY:
-	elseif x == 16 and y == 8 then
+	elseif x == 16 and y == (grid_size == 128 and 8 or 16) then
 		_alt = z == 1
 	end
 
@@ -182,7 +220,7 @@ function redraw_grid()
 	grid_led_all(0)
 
 	-- snapshots:
-	for y = 1, 7 do
+	for y = 1, (grid_size == 128 and 7 or 15) do
 		if #snapshots[y].data > 0 then
 			local unselected = max_brightness > 12 and 8 or 5
 			grid_led(16, y, snapshots.focus == y and max_brightness or unselected)
@@ -190,45 +228,40 @@ function redraw_grid()
 	end
 
 	-- voices:
-	for i = 1,number_of_voices do
-		-- binary stream:
-		for j = 1, 8 do
-			if voice[i].seed_as_binary[j] == 1 then
-				grid_led(9 - j, i, 4)
-			else
-				grid_led(9 - j, i, 1)
+	for i = 1, number_of_voices do
+		-- RULE DISPLAY:
+		if _alt then
+			for j = 1, 8 do
+				if voice[i].rule_as_binary[j] == 1 then
+					grid_led(9 - j, i, 8)
+				else
+					grid_led(9 - j, i, 2)
+				end
 			end
-		end
-		grid_led(9 - voice[i].bit, i, 8)
-		if voice[i].seed_as_binary[voice[i].bit] == 1 and display_voice[i] then
-			grid_led(9 - voice[i].bit, i, 15)
+		else
+			-- binary stream:
+			for j = 1, 8 do
+				if voice[i].seed_as_binary[j] == 1 then
+					grid_led(9 - j, i, 4)
+				else
+					grid_led(9 - j, i, 1)
+				end
+			end
+			grid_led(9 - voice[i].bit, i, 8)
+			if voice[i].seed_as_binary[voice[i].bit] == 1 and display_voice[i] then
+				grid_led(9 - voice[i].bit, i, 15)
+			end
 		end
 	end
 
 	-- _alt:
-	grid_led(16, 8, _alt and max_brightness or 5)
+	grid_led(16, grid_size == 128 and 8 or 16, _alt and max_brightness or 5)
 
 	grid_refresh()
 end
 -- // GRID
 
 -- CA logic //
-
--- translate the seed integer to binary
-local function seed_to_binary(v)
-	voice[v].seed_as_binary = {}
-	for i = 0, 7 do
-		table.insert(voice[v].seed_as_binary, (voice[v].seed & (2 ^ i)) >> i)
-	end
-end
-
--- translate the rule integer to binary
-local function rule_to_binary(v)
-	voice[v].rule_as_binary = {}
-	for i = 0, 7 do
-		table.insert(voice[v].rule_as_binary, (voice[v].rule & (2 ^ i)) >> i)
-	end
-end
 
 -- basic compare function, used in bang()
 local function compare(s, n)
@@ -248,19 +281,16 @@ local function compare(s, n)
 	return false
 end
 
--- scale seeds to the note pool + range selected
 local function scale(lo, hi, received)
 	scaled = math.floor(((received / 256) * (hi + 1 - lo) + lo))
 end
 
--- allow user to define the transposition of voice 1 and voice 2, simultaneous changes to MIDI and Passersby engine
 local function transpose(semitone)
 	semi = semitone
 end
 
 local function bang(v)
-	seed_to_binary(v)
-	rule_to_binary(v)
+	voice[v].seed_as_binary = seed_to_binary(v)
 	local seed_pack = {}
 	for i = 1, 8 do
 		seed_pack[i] = {
@@ -285,23 +315,23 @@ local function bang(v)
 
 	voice[v].next_seed = 0
 	for i = 1, 8 do
-		voice[v].out[i] = com(seed_pack[i], 8 - i, 2 ^ (8 - i))
-		voice[v].next_seed = voice[v].next_seed + voice[v].out[i]
+		voice[v].next_seed = voice[v].next_seed + com(seed_pack[i], 8 - i, 2 ^ (8 - i))
 	end
-	-- print(voice[v].next_seed)
 end
 
 function notes_off(n)
 	for i = 1, #voice[n].active_notes do
-		midi_note_off(voice[n].active_notes[i])
+		midi_note_off(
+			voice[n].active_notes[i],
+			voice[n].vel,
+			voice[n].ch
+		)
 		voice[n].active_notes = {}
 	end
 end
 
 local function iterate(i)
-	-- if ppqn_counter > ppqn / ppqn_divisions[sel_ppqn_div] then
 	if ppqn_counter[i] > ppqn[i] then
-		-- print(ppqn_counter[i])
 		ppqn_counter[i] = 1
 		notes_off(i)
 		voice[i].seed = voice[i].next_seed
@@ -320,7 +350,7 @@ local function iterate(i)
 				end
 				midi_note_on(
 					notes[i][scaled] + (36 + (voice[i].octave * 12) + voice[i].semi + random_note[i].add),
-					64,
+					voice[i].vel,
 					voice[i].ch
 				)
 				table.insert(
@@ -333,6 +363,19 @@ local function iterate(i)
 	else
 		ppqn_counter[i] = ppqn_counter[i] + 1
 	end
+end
+
+function change_rule(i, r)
+	voice[i].rule = r
+	voice[i].seed = voice[i].originating_seed
+	voice[i].rule_as_binary = rule_to_binary(i)
+	bang(i)
+end
+
+function change_seed(i,s)
+	voice[i].originating_seed = s
+	voice[i].seed = s
+	bang(i)
 end
 -- // CA logic
 
