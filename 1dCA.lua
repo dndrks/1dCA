@@ -17,13 +17,6 @@ local main_metro = 4
 local number_of_voices = grid_size == 128 and 8 or 16
 local transport_running = false
 
-ppqn = {}
-local ppqn_counter = {}
-for i = 1, number_of_voices do
-	ppqn[i] = 96/4
-	ppqn_counter[i] = 1
-end
-
 local neighborhoods = {
 	{ 1, 1, 1 },
 	{ 1, 1, 0 },
@@ -74,7 +67,8 @@ voice = {}
 local display_voice = {}
 for i = 1, number_of_voices do
 	voice[i] = {}
-	voice[i].bit = 0
+	voice[i].muted = false
+	voice[i].bit = 1
 	voice[i].octave = 0
 	voice[i].active_notes = {}
 	voice[i].ch = i
@@ -88,7 +82,15 @@ for i = 1, number_of_voices do
 	voice[i].scale_low = 1
 	voice[i].scale_high = #notes[i]
 	voice[i].semi = 0
+	voice[i].ppqn_div = 4
 	display_voice[i] = false
+end
+
+ppqn = {}
+local ppqn_counter = {}
+for i = 1, number_of_voices do
+	ppqn[i] = 96 / voice[i].ppqn_div
+	ppqn_counter[i] = 1
 end
 
 local random_gate = {}
@@ -116,19 +118,46 @@ for i = 1, 15 do
 	snapshots[i].data = {}
 end
 
+function toggle_mute(i)
+	voice[i].muted = not voice[i].muted
+end
+
+
+local snapshot_params = {
+	"bit",
+	"octave",
+	"rule",
+	"rule_as_binary",
+	"seed",
+	"seed_as_binary",
+	"originating_seed",
+	"semi",
+	"scale_low",
+	"scale_high",
+	"vel",
+	"ch",
+	"ppqn_div",
+	"muted"
+}
+
 function snapshot_pack(slot)
 	for i = 1, number_of_voices do
-		snapshots[slot].data[i] = {
-			bit = voice[i].bit,
-			octave = voice[i].octave
-		}
+		snapshots[slot].data[i] = {}
+		for _,v in pairs(snapshot_params) do
+			snapshots[slot].data[i][v] = voice[i][v]
+		end
 	end
 end
 
 function snapshot_unpack(slot, jump)
 	for i = 1, number_of_voices do
-		voice[i].bit = snapshots[slot].data[i].bit
-		voice[i].octave = snapshots[slot].data[i].octave
+		for _, v in pairs(snapshot_params) do
+			voice[i][v] = snapshots[slot].data[i][v]
+		end
+		voice[i].rule_as_binary = rule_to_binary(i)
+		voice[i].seed = voice[i].originating_seed
+		change_ppqn_div(i, snapshots[slot].data[i].ppqn_div)
+		bang(i)
 	end
 end
 
@@ -183,16 +212,33 @@ function grid(x, y, z)
 	if x == 16 and y <= (grid_size == 128 and 6 or 14) then
 		snapshot_press(x,y,z)
 	-- BITS:
-	elseif x <= 9 and y <= number_of_voices and z == 1 then
+	elseif x <= 8 and y <= number_of_voices and z == 1 then
 		-- CHANGE RULE:
-		if _alt then
-			voice[y].rule_as_binary[9-x] = voice[y].rule_as_binary[9-x] == 1 and 0 or 1
+		if _rule then
+			voice[y].rule_as_binary[9 - x] = voice[y].rule_as_binary[9 - x] == 1 and 0 or 1
 			change_rule(y, binary_to_number(voice[y].rule_as_binary))
 		-- CHANGE BIT:
+		elseif _seed then
+			local originating_seed_as_binary = number_to_binary(voice[y].originating_seed)
+			originating_seed_as_binary[9 - x] = originating_seed_as_binary[9 - x] == 1 and 0 or 1
+			change_seed(y, binary_to_number(originating_seed_as_binary))
+		elseif _ppqn then
+			change_ppqn_div(y, x)
 		else
 			voice[y].bit = 9 - x
 		end
-	-- ALT KEY:
+	elseif x == 10 and y <= number_of_voices and z == 1 and _alt then
+		toggle_mute(y)
+	-- _ppqn KEY:
+	elseif x == 12 and y == (grid_size == 128 and 8 or 16) then
+		_ppqn = z == 1
+	-- _rule KEY:
+	elseif x == 14 and y == (grid_size == 128 and 8 or 16) then
+		_rule = z == 1
+	-- _seed KEY:
+	elseif x == 15 and y == (grid_size == 128 and 8 or 16) then
+		_seed = z == 1
+	-- _alt KEY:
 	elseif x == 16 and y == (grid_size == 128 and 8 or 16) then
 		_alt = z == 1
 	end
@@ -230,7 +276,7 @@ function redraw_grid()
 	-- voices:
 	for i = 1, number_of_voices do
 		-- RULE DISPLAY:
-		if _alt then
+		if _rule then
 			for j = 1, 8 do
 				if voice[i].rule_as_binary[j] == 1 then
 					grid_led(9 - j, i, 8)
@@ -238,22 +284,48 @@ function redraw_grid()
 					grid_led(9 - j, i, 2)
 				end
 			end
+		elseif _seed then
+			local originating_seed_as_binary = number_to_binary(voice[i].originating_seed)
+			for j = 1, 8 do
+				if originating_seed_as_binary[j] == 1 then
+					grid_led(9 - j, i, 8)
+				else
+					grid_led(9 - j, i, 2)
+				end
+			end
+		elseif _ppqn then
+			for j = 1, 8 do
+				if voice[i].ppqn_div == j then
+					grid_led(j, i, 8)
+				else
+					grid_led(j, i, 2)
+				end
+			end
 		else
 			-- binary stream:
 			for j = 1, 8 do
 				if voice[i].seed_as_binary[j] == 1 then
-					grid_led(9 - j, i, 4)
+					grid_led(9 - j, i, voice[i].muted and 2 or 4)
 				else
-					grid_led(9 - j, i, 1)
+					grid_led(9 - j, i, voice[i].muted and 0 or 2)
 				end
 			end
-			grid_led(9 - voice[i].bit, i, 8)
+			grid_led(9 - voice[i].bit, i, voice[i].muted and 4 or 9)
+			if _alt then
+				grid_led(10, i, voice[i].muted and 4 or 12)
+			end
 			if voice[i].seed_as_binary[voice[i].bit] == 1 and display_voice[i] then
 				grid_led(9 - voice[i].bit, i, 15)
 			end
 		end
 	end
 
+	-- _ppqn:
+	grid_led(12, grid_size == 128 and 8 or 16, _ppqn and max_brightness or 3)
+	-- _rule:
+	grid_led(14, grid_size == 128 and 8 or 16, _rule and max_brightness or 3)
+	-- _seed:
+	grid_led(15, grid_size == 128 and 8 or 16, _seed and max_brightness or 3)
 	-- _alt:
 	grid_led(16, grid_size == 128 and 8 or 16, _alt and max_brightness or 5)
 
@@ -289,7 +361,7 @@ local function transpose(semitone)
 	semi = semitone
 end
 
-local function bang(v)
+function bang(v)
 	voice[v].seed_as_binary = seed_to_binary(v)
 	local seed_pack = {}
 	for i = 1, 8 do
@@ -337,7 +409,7 @@ local function iterate(i)
 		voice[i].seed = voice[i].next_seed
 		bang(i)
 		display_voice[i] = false
-		if voice[i].seed_as_binary[voice[i].bit] == 1 then
+		if not voice[i].muted and voice[i].seed_as_binary[voice[i].bit] == 1 then
 			random_gate[i].comparator = math.random(0, 100)
 			if random_gate[i].comparator < random_gate[i].probability then
 				scale(voice[i].scale_low, voice[i].scale_high, voice[i].seed)
@@ -376,6 +448,12 @@ function change_seed(i,s)
 	voice[i].originating_seed = s
 	voice[i].seed = s
 	bang(i)
+end
+
+function change_ppqn_div(i, div)
+	voice[i].ppqn_div = div
+	ppqn[i] = 96/div
+	ppqn_counter[i] = 1
 end
 -- // CA logic
 
