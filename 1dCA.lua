@@ -1,20 +1,42 @@
 -- 1dCA: one-dimensional cellular automata
 
+local number_of_voices = grid_size == 128 and 8 or 16
+
 -- EDIT THIS!
 max_brightness = 10
+
+-- EDIT THIS!
+-- a table to track our note values:
+notes = {}
+for i = 1, number_of_voices do
+	notes[i] = { 60, 62, 64, 67, 72, 77 }
+end
 
 local grid_size = grid_size_x() * grid_size_y()
 local start_time = get_time()
 local dirty = true
-local intro_metro = 1
 local intro_level = 10
 local intro_duration = 10
 local intro_complete = false
-local redraw_metro = 2
-local snapshots_saver_metro = 3
-local main_metro = 4
+local PSET = {
+	data = {
+		false,
+		false,
+		false,
+		false,
+		false,
+		false,
+		false,
+		false
+	},
+	focus = 0
+}
 
-local number_of_voices = grid_size == 128 and 8 or 16
+-- for i = 1,#PSET.data do
+-- 	if pset_read(i) then
+-- 	end
+-- end
+
 local transport_running = false
 
 local neighborhoods = {
@@ -27,13 +49,6 @@ local neighborhoods = {
 	{ 0, 0, 1 },
 	{ 0, 0, 0 },
 }
-
--- EDIT THIS!
--- a table to track our note values:
-notes = {}
-for i = 1, number_of_voices do
-	notes[i] = { 60, 62, 64, 67, 72, 77 }
-end
 
 -- BINARY OPS //
 function number_to_binary(n)
@@ -81,7 +96,6 @@ for i = 1, number_of_voices do
 	voice[i].rule_as_binary = rule_to_binary(i)
 	voice[i].scale_low = 1
 	voice[i].scale_high = #notes[i]
-	voice[i].semi = 0
 	voice[i].ppqn_div = 4
 	display_voice[i] = false
 end
@@ -104,7 +118,6 @@ local random_note = {}
 for i = 1, number_of_voices do
 	random_note[i] = {}
 	random_note[i].tran = 0
-	random_note[i].down = 0
 	random_note[i].comparator = 99
 	random_note[i].probability = 100
 	random_note[i].add = 0
@@ -113,10 +126,11 @@ end
 -- SNAPSHOTS //
 -- a table to track our snapshots:
 local snapshots = {}
-for i = 1, 15 do
+for i = 1, 16 do
 	snapshots[i] = {}
 	snapshots[i].data = {}
 end
+snapshots.alt = false
 
 function toggle_mute(i)
 	voice[i].muted = not voice[i].muted
@@ -131,7 +145,6 @@ local snapshot_params = {
 	"seed",
 	"seed_as_binary",
 	"originating_seed",
-	"semi",
 	"scale_low",
 	"scale_high",
 	"vel",
@@ -176,24 +189,28 @@ function snapshot_clear(slot)
 	dirty = true
 end
 
-function snapshot_press(x,y,z)
+function run_snapshot_saver()
+	snapshots_saver_metro = metro.new(function(x) snapshots_saver_metro_exec() end, 250, 1)
+end
+
+function snapshot_press(snap,z)
 	if z == 1 then
-		if #snapshots[y].data == 0 then
+		if #snapshots[snap].data == 0 then
 			if snapshot_being_saved == nil then
-				snapshot_being_saved = y
-				metro_set(snapshots_saver_metro, 250, 1)
+				snapshot_being_saved = snap
+				run_snapshot_saver()
 			end
 		elseif not _alt then
-			if snapshots.focus == y then
-				snapshot_unpack(y, true)
+			if snapshots.focus == snap then
+				snapshot_unpack(snap, true)
 			else
-				snapshots.focus = y
-				snapshot_unpack(y, false)
+				snapshots.focus = snap
+				snapshot_unpack(snap, false)
 			end
 		else
 			if snapshot_being_saved == nil then
-				snapshot_being_saved = y
-				metro_set(snapshots_saver_metro, 250, 1)
+				snapshot_being_saved = snap
+				run_snapshot_saver()
 			end
 		end
 	else
@@ -209,8 +226,13 @@ end
 -- GRID KEY HANDLING:
 function grid(x, y, z)
 	-- SNAPSHOT MANAGEMENT:
-	if x == 16 and y <= (grid_size == 128 and 6 or 14) then
-		snapshot_press(x,y,z)
+	if x >= 13 and x <= 16 and y >= 1 and y <= 4 then
+		local snapshot = (x - 12) + (4 * (y - 1))
+		snapshot_press(snapshot,z)
+	elseif x == 16 and y == 5 then
+		snapshots.alt = z == 1
+	elseif snapshots.alt and x >= 12 and x <= 16 and (y == 6 or y == 7) and z == 1 then
+		
 	-- BITS:
 	elseif x <= 8 and y <= number_of_voices and z == 1 then
 		-- CHANGE RULE:
@@ -266,12 +288,18 @@ function redraw_grid()
 	grid_led_all(0)
 
 	-- snapshots:
-	for y = 1, (grid_size == 128 and 7 or 15) do
-		if #snapshots[y].data > 0 then
-			local unselected = max_brightness > 12 and 8 or 5
-			grid_led(16, y, snapshots.focus == y and max_brightness or unselected)
+	for x = 13, 16 do
+		for y = 1, 4 do
+			local snap = (x - 12) + (4 * (y - 1))
+			if #snapshots[snap].data > 0 then
+				local unselected = max_brightness > 12 and 8 or 5
+				grid_led(x, y, snapshots.focus == snap and max_brightness or unselected)
+			else
+				grid_led(x, y, 2)
+			end
 		end
 	end
+	grid_led(16,5,snapshots.alt and 15 or 5)
 
 	-- voices:
 	for i = 1, number_of_voices do
@@ -357,10 +385,6 @@ local function scale(lo, hi, received)
 	scaled = math.floor(((received / 256) * (hi + 1 - lo) + lo))
 end
 
-local function transpose(semitone)
-	semi = semitone
-end
-
 function bang(v)
 	voice[v].seed_as_binary = seed_to_binary(v)
 	local seed_pack = {}
@@ -421,13 +445,13 @@ local function iterate(i)
 					random_note[i].add = 0
 				end
 				midi_note_on(
-					notes[i][scaled] + (36 + (voice[i].octave * 12) + voice[i].semi + random_note[i].add),
+					notes[i][scaled] + (36 + (voice[i].octave * 12) + random_note[i].add),
 					voice[i].vel,
 					voice[i].ch
 				)
 				table.insert(
 					voice[i].active_notes,
-					notes[i][scaled] + (36 + (voice[i].octave * 12) + voice[i].semi + random_note[i].add)
+					notes[i][scaled] + (36 + (voice[i].octave * 12) + random_note[i].add)
 				)
 			end
 		end
@@ -457,36 +481,43 @@ function change_ppqn_div(i, div)
 end
 -- // CA logic
 
--- METRO //
-function metro(index, count)
-	if index == intro_metro then
-		if get_time() - start_time >= intro_duration then
-			metro_set(intro_metro, 0)
-			intro_complete = true
-			transport_running = true
-			dirty = true
-		else
-			draw_intro()
-		end
-	elseif index == redraw_metro and dirty then
-		if intro_complete then
-			redraw_grid()
-			dirty = false
-		end
-	elseif index == snapshots_saver_metro then
-		if snapshot_being_saved ~= nil then
-			snapshot_save(snapshot_being_saved)
-			snapshot_being_saved = nil
-			dirty = true
-		end
-	elseif index == main_metro and transport_running then
-		for i = 1,number_of_voices do
+-- METROS //
+
+function intro_metro_exec()
+	if get_time() - start_time >= intro_duration then
+		metro_set(intro_metro, 0)
+		intro_complete = true
+		redraw_metro = metro.new(function(x) redraw_metro_exec() end, 20, -1)
+		transport_running = true
+		dirty = true
+	else
+		draw_intro()
+	end
+end
+
+function redraw_metro_exec()
+	if dirty then
+		redraw_grid()
+		dirty = false
+	end
+end
+
+function main_metro_exec()
+	if transport_running then
+		for i = 1, number_of_voices do
 			iterate(i)
 		end
 	end
 end
--- // METRO
 
-metro_set(intro_metro, 50)
-metro_set(redraw_metro, 20) -- (1000/50), 50fps in ms [needed as of 241203]
-metro_set(main_metro, 10)
+function snapshots_saver_metro_exec()
+	if snapshot_being_saved ~= nil then
+		snapshot_save(snapshot_being_saved)
+		snapshot_being_saved = nil
+		dirty = true
+	end
+end
+-- // METROS
+
+intro_metro = metro.new(function(x) intro_metro_exec() end, 50, -1)
+main_metro = metro.new(function(x) main_metro_exec() end, 10, -1)
